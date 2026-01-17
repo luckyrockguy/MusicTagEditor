@@ -319,17 +319,6 @@ class MusicTagEditorGUI:
         if len(self.history_dict[var_name]) > 7:
             self.history_dict[var_name].pop(0)
 
-    def run_process(self):
-        # ... (기존 태그 수정 로직 수행 후) ...
-        # [추가] 작업 성공 시 현재 입력된 값들을 히스토리에 저장
-        for k in ["ent_title", "ent_artist", "ent_track", "ent_album", "ent_genre", "ent_date"]:
-            val = getattr(self, k).get().strip()
-            self.update_history(k, val)
-        
-        self.refresh_grid_list(self.selected_path)
-        self.log(f"--- 작업 완료 및 히스토리 갱신 완료 ---")
-
-
     def advanced_title_parse(self):
         """텍스트 파싱 및 트랙 번호 추출 기능"""
         src = self.ent_title.get().strip()

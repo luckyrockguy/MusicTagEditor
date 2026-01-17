@@ -21,7 +21,7 @@ class SelectionDialog(tk.Toplevel):
         lbl.pack(pady=10)
 
         # 트리뷰를 사용하여 검색 결과 표시
-        cols = ("앨범명", "아티스트", "트랙수", "연도")
+        cols = ("앨범명", "아티스트", "트랙번호", "연도")
         self.tree = ttk.Treeview(self, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             self.tree.heading(c, text=c)
@@ -35,9 +35,20 @@ class SelectionDialog(tk.Toplevel):
             rel = res.get('release-list', [{}])[0]
             alb = rel.get('title', '-')
             art = res.get('artist-credit-phrase', '-')
-            cnt = rel.get('medium-track-count', '-')
             dat = rel.get('date', '-')[:4]
-            self.tree.insert("", "end", values=(alb, art, cnt, dat), tags=(res['id'],))
+            
+            # [수정] 전체 트랙수가 아닌, 이 곡의 해당 앨범 내 트랙 번호를 추출
+            trk_num = "-"
+            try:
+                # medium-list 안의 track-list에서 현재 검색된 곡과 일치하는 트랙 번호 찾기
+                medium = rel.get('medium-list', [{}])[0]
+                track_list = medium.get('track-list', [])
+                # recording 검색 결과이므로 보통 첫 번째 트랙 리스트의 number가 해당 곡의 번호입니다.
+                trk_num = track_list[0].get('number', '-')
+            except:
+                pass
+           
+            self.tree.insert("", "end", values=(alb, art, trk_num, dat), tags=(res['id'],))
 
         btn_frame = tk.Frame(self)
         btn_frame.pack(pady=10)
@@ -47,10 +58,13 @@ class SelectionDialog(tk.Toplevel):
         self.tree.bind("<Double-1>", lambda e: self.on_select())
         self.grab_set() # 팝업이 닫히기 전까지 메인 창 조작 방지
 
+    # SelectionDialog 클래스 내부의 on_select 메서드 수정
     def on_select(self):
         sel = self.tree.selection()
         if sel:
+            # 선택된 줄의 모든 값(앨범명, 아티스트, 트랙수, 연도)을 가져옴
             self.result_data = self.tree.item(sel[0], 'values')
+            # 선택된 아이템의 tags에 저장해둔 musicbrainz id를 함께 넘길 수도 있습니다.
             self.destroy()
 
 class MusicTagEditorGUI:
@@ -76,6 +90,7 @@ class MusicTagEditorGUI:
         self.log_area.see(tk.END)
 
     # --- 개선된 온라인 검색 기능 (팝업 연동) ---
+    # MusicTagEditorGUI 클래스 내부의 fetch_online_data 메서드 수정
     def fetch_online_data(self):
         art, tit = self.ent_artist.get().strip(), self.ent_title.get().strip()
         if not art or not tit: 
@@ -84,7 +99,6 @@ class MusicTagEditorGUI:
 
         self.log(f"검색 요청: {art} - {tit}")
         try:
-            # 검색 범위를 조금 넓혀서 최대 10개까지 가져옴
             res = musicbrainzngs.search_recordings(artist=art, recording=tit, limit=10)
             recordings = res.get('recording-list', [])
 
@@ -94,37 +108,92 @@ class MusicTagEditorGUI:
                 return
 
             if len(recordings) == 1:
-                # 결과가 하나면 즉시 적용
                 self.apply_search_result(recordings[0])
             else:
-                # 결과가 여러 개면 선택 팝업 실행
                 dialog = SelectionDialog(self.root, recordings)
                 self.root.wait_window(dialog)
+                
                 if dialog.result_data:
-                    alb, _, _, dat = dialog.result_data
+                    # dialog.result_data 구조: (앨범명, 아티스트, 트랙번호, 연도)
+                    alb, artist_name, trk, dat = dialog.result_data
+                    
+                    # 입력 필드 업데이트 (기존 앨범, 연도 외에 '트랙' 추가)
                     self.update_field_with_compare(self.ent_album, alb)
                     self.update_field_with_compare(self.ent_date, dat)
-                    self.log(f"사용자 선택 적용: {alb} ({dat})")
+                    
+                    # --- [수정 구간: 트랙 번호 입력 추가] ---
+                    if trk and trk != '-':
+                        self.update_field_with_compare(self.ent_track, trk)
+                    # ---------------------------------------
+                    
+                    # 아티스트 정보도 필요시 업데이트 가능
+                    self.update_field_with_compare(self.ent_artist, artist_name)
+                    
+                    self.log(f"사용자 선택 적용: {alb} | 트랙: {trk} | 연도: {dat}")
 
         except Exception as e:
             self.log(f"검색 중 오류 발생: {e}")
 
     def apply_search_result(self, d):
         rel = d.get('release-list', [{}])[0]
-        self.update_field_with_compare(self.ent_album, rel.get('title', '-'))
-        self.update_field_with_compare(self.ent_date, rel.get('date', '-')[:4])
-        self.log(f"자동 적용 완료: {rel.get('title', '-')}")
+        # 앨범명, 연도 추출
+        alb_title = rel.get('title', '-')
+        rel_date = rel.get('date', '-')[:4]
+        
+        # [수정] 해당 녹음(Recording)의 정확한 트랙 번호 추출
+        trk_num = "-"
+        try:
+            # MusicBrainz의 recording 검색 결과는 해당 곡이 포함된 앨범 정보를 함께 줍니다.
+            # 그 앨범(release) 내의 트랙 리스트에서 '이 곡'의 순번을 가져옵니다.
+            medium_list = rel.get('medium-list', [])
+            if medium_list:
+                track_list = medium_list[0].get('track-list', [])
+                if track_list:
+                    trk_num = track_list[0].get('number', '-')
+        except Exception as e:
+            self.log(f"트랙 번호 추출 실패: {e}")
+
+        self.update_field_with_compare(self.ent_album, alb_title)
+        self.update_field_with_compare(self.ent_date, rel_date)
+        
+        # 트랙 번호가 존재할 경우 입력 (01 등으로 변환은 이후 run_process에서 처리됨)
+        if trk_num != "-":
+            self.update_field_with_compare(self.ent_track, trk_num)
+        
+        self.log(f"정보 수신: {alb_title} | 트랙: {trk_num}")
 
     # --- 기존 정렬 및 유틸리티 로직 ---
     def sort_column(self, col, reverse):
+        """그리드의 모든 헤더를 클릭했을 때 호출되는 정렬 메서드"""
+        # 현재 그리드의 모든 항목 가져오기 (값, 아이디)
         l = [(self.file_grid.set(k, col), k) for k in self.file_grid.get_children('')]
-        try:
-            l.sort(key=lambda t: int(re.sub(r'[^0-9]', '', t[0])) if re.sub(r'[^0-9]', '', t[0]) else 0, reverse=reverse)
-        except:
-            l.sort(reverse=reverse)
+        
+        # 정렬 기준 설정 함수
+        def sort_key(item):
+            val = item[0]
+            # 1. 비트전송률 (예: '320k') 처리
+            if col == "비트전송률":
+                try: return int(re.sub(r'[^0-9]', '', val))
+                except: return 0
+            
+            # 2. 트랙 번호나 연도 등 숫자 데이터 처리
+            if val.isdigit():
+                return int(val)
+            
+            # 3. 일반 문자열 (가수명, 제목 등) - 대소문자 구분 없이 처리
+            return val.lower()
+
+        # 데이터 정렬 실행
+        l.sort(key=sort_key, reverse=reverse)
+
+        # 정렬된 순서대로 트리뷰 항목 이동
         for index, (val, k) in enumerate(l):
             self.file_grid.move(k, '', index)
+
+        # 다음 클릭 시 반대 방향으로 정렬되도록 헤더 명령 업데이트
         self.file_grid.heading(col, command=lambda: self.sort_column(col, not reverse))
+        
+        self.log(f"정렬 완료: [{col}] 기준 {'내림차순' if reverse else '오름차순'}")
 
     # (이하 UI 및 탐색기 관련 코드는 v2.0과 동일하게 유지)
     def setup_ui(self):
@@ -152,21 +221,114 @@ class MusicTagEditorGUI:
     def create_input_fields(self):
         f_grid = tk.Frame(self.input_area, bg="#FFFFFF")
         f_grid.pack(fill=tk.X)
-        self.lbl_path = tk.Label(f_grid, text="📁 폴더를 선택해 주세요", fg="#555555", bg="#FFFFFF", font=('Malgun Gothic', 9, 'bold'))
+
+        # 현재 선택된 폴더 경로 표시 레이블
+        self.lbl_path = tk.Label(f_grid, text="📁 폴더를 선택해 주세요", fg="#555555", 
+                                 bg="#FFFFFF", font=('Malgun Gothic', 9, 'bold'))
         self.lbl_path.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
-        fields = [("제목", "ent_title", False), ("가수", "ent_artist", False), ("트랙", "ent_track", False), ("앨범", "ent_album", True), ("장르", "ent_genre", True), ("연도", "ent_date", True), ("키워드", "ent_keywords", False)]
+
+        # 필드 구성 정의: (레이블 텍스트, 변수명, CLR 버튼 여부)
+        fields = [
+            ("제목", "ent_title", False), 
+            ("가수", "ent_artist", False), 
+            ("트랙", "ent_track", False), 
+            ("앨범", "ent_album", True), 
+            ("장르", "ent_genre", True), 
+            ("연도", "ent_date", True), 
+            ("키워드", "ent_keywords", False)
+        ]
+
         for i, (lt, vn, cl) in enumerate(fields, 1):
+            # 레이블 영역 (텍스트 + CLR 버튼)
             lbl_c = tk.Frame(f_grid, bg="#FFFFFF")
             lbl_c.grid(row=i, column=0, sticky="e", pady=3, padx=(0, 10))
+            
             tk.Label(lbl_c, text=lt, font=('Malgun Gothic', 9), bg="#FFFFFF").pack(side=tk.LEFT)
+            
+            # Entry(입력창) 생성
             ent = tk.Entry(f_grid, font=('Malgun Gothic', 10), relief=tk.SOLID, borderwidth=1)
             setattr(self, vn, ent)
-            if cl: ttk.Button(lbl_c, text="CLR", command=lambda e=ent: self.set_null_value(e), width=4).pack(side=tk.LEFT, padx=2)
+            
+            # [기능 추가] 더블 클릭 시 최근 입력 기록 7개 팝업 노출
+            ent.bind("<Double-1>", lambda e, v=vn: self.show_history_popup(e, v))
+            
+            # CLR(초기화) 버튼이 필요한 필드인 경우
+            if cl: 
+                ttk.Button(lbl_c, text="CLR", command=lambda e=ent: self.set_null_value(e), 
+                           width=4).pack(side=tk.LEFT, padx=2)
+            
+            # 레이아웃 배치 로직
             if vn == "ent_title":
+                # 제목 필드 옆에는 '파일명 추출' 버튼 배치
                 ttk.Button(f_grid, text="파일명 추출", command=self.load_filename_to_title).grid(row=i, column=1, padx=2)
                 ent.grid(row=i, column=2, columnspan=2, sticky="ew", padx=2)
-            else: ent.grid(row=i, column=1, columnspan=3, sticky="ew", padx=2, pady=3)
+            else:
+                # 나머지 필드는 길게 배치
+                ent.grid(row=i, column=1, columnspan=3, sticky="ew", padx=2, pady=3)
+        
+        # 그리드 너비 가변 설정
         f_grid.columnconfigure(2, weight=1)
+
+    def show_history_popup(self, event, var_name):
+        """더블 클릭 시 최근 기록 7개를 보여주는 팝업 생성"""
+        history = self.history_dict.get(var_name, [])
+        if not history:
+            return
+
+        # 팝업 창 설정
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True) # 타이틀바 제거 (깔끔한 리스트 형태)
+        
+        # 위치 설정 (마우스 클릭 위치 근처)
+        popup.geometry(f"250x{min(len(history) * 25, 175)}+{event.x_root}+{event.y_root}")
+
+        listbox = tk.Listbox(popup, font=('Malgun Gothic', 9), bd=1, relief=tk.SOLID)
+        listbox.pack(fill=tk.BOTH, expand=True)
+
+        # 최근 7개까지만 역순(최신순)으로 표시
+        display_items = history[-7:][::-1]
+        for item in display_items:
+            listbox.insert(tk.END, item)
+
+        def on_select(evt):
+            if listbox.curselection():
+                selected_val = listbox.get(listbox.curselection())
+                entry_widget = getattr(self, var_name)
+                entry_widget.delete(0, tk.END)
+                entry_widget.insert(0, selected_val)
+                popup.destroy()
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        listbox.bind("<FocusOut>", lambda e: popup.destroy())
+        listbox.focus_set()
+
+    def update_history(self, var_name, value):
+        """새로운 입력값을 히스토리에 저장 (최대 7개 유지, 중복 제거)"""
+        if not value or value.upper() == "NULL": return
+        
+        if var_name not in self.history_dict:
+            self.history_dict[var_name] = []
+        
+        # 중복 제거 후 추가
+        if value in self.history_dict[var_name]:
+            self.history_dict[var_name].remove(value)
+        
+        self.history_dict[var_name].append(value)
+        
+        # 7개 초과 시 오래된 순으로 삭제
+        if len(self.history_dict[var_name]) > 7:
+            self.history_dict[var_name].pop(0)
+
+    def run_process(self):
+        # ... (기존 태그 수정 로직 수행 후) ...
+        # [추가] 작업 성공 시 현재 입력된 값들을 히스토리에 저장
+        for k in ["ent_title", "ent_artist", "ent_track", "ent_album", "ent_genre", "ent_date"]:
+            val = getattr(self, k).get().strip()
+            self.update_history(k, val)
+        
+        self.refresh_grid_list(self.selected_path)
+        self.log(f"--- 작업 완료 및 히스토리 갱신 완료 ---")
+
 
     def advanced_title_parse(self):
         """텍스트 파싱 및 트랙 번호 추출 기능"""
@@ -224,7 +386,11 @@ class MusicTagEditorGUI:
         self.file_grid.tag_configure('diff', foreground='#0078D4')
         for c in self.cols: 
             self.file_grid.heading(c, text=c, command=lambda _c=c: self.sort_column(_c, False))
-            self.file_grid.column(c, width=70, anchor="center")
+            # 열별 너비 및 정렬 설정
+            if c == "파일명":
+                self.file_grid.column(c, width=300, anchor="w")
+            else:
+                self.file_grid.column(c, width=80, anchor="center")
         self.file_grid.column("파일명", width=300, anchor="w")
         vsb = ttk.Scrollbar(g_f, orient="vertical", command=self.file_grid.yview)
         self.file_grid.configure(yscrollcommand=vsb.set)
@@ -331,21 +497,111 @@ class MusicTagEditorGUI:
             os.rename(old, new_fp); self.on_drive_select(None)
     def run_process(self):
         targets = self.file_grid.selection()
-        if not targets: return
+        if not targets: 
+            messagebox.showwarning("알림", "수정할 파일을 목록에서 선택해 주세요.")
+            return
+            
+        # [검증] 제목과 가수 정보 가져오기
+        current_title = self.ent_title.get().strip()
+        current_artist = self.ent_artist.get().strip()
+        
+        # [추가] 복수 파일 선택 시 제목 입력값 체크 로직
+        if len(targets) > 1 and current_title:
+            messagebox.showerror("수정 거부", 
+                "복수의 파일이 선택된 상태에서는 '제목'을 일괄 수정할 수 없습니다.\n"
+                "제목 칸을 비우거나 파일을 하나만 선택해 주세요.")
+            return
+        
+        # 입력창에서 현재 입력된 정보 가져오기
         raw = {k: getattr(self, k).get().strip() for k in ["ent_title", "ent_artist", "ent_track", "ent_album", "ent_genre", "ent_date"]}
+        
+        success_count = 0
         for item_id in targets:
             fp = self.full_file_paths.get(item_id)
-            if not fp: continue
+            if not fp or not os.path.exists(fp): continue
+            
             try:
+                # 1. 태그 수정 및 저장
                 audio = mutagen.File(fp, easy=True)
-                mapping = {'title': 'ent_title', 'artist': 'ent_artist', 'album': 'ent_album', 'tracknumber': 'ent_track', 'date': 'ent_date', 'genre': 'ent_genre'}
+                mapping = {'title': 'ent_title', 'artist': 'ent_artist', 'album': 'ent_album', 
+                           'tracknumber': 'ent_track', 'date': 'ent_date', 'genre': 'ent_genre'}
+                
+                # [데이터 분리 처리]
+                raw_track = raw['ent_track']
+                tag_track = ""    # 파일 내부 태그용 (정수형 문자열: 1)
+                file_track = "00" # 파일 이름용 (두 자리 문자열: 01)
+                
+                # 복수 선택 시 트랙 번호는 태그에 쓰지 않음
+                if len(targets) > 1:
+                    tag_track = "" # 빈 값으로 설정하여 기존 태그 유지 또는 무시
+                elif raw_track.isdigit():
+                    track_int = int(raw_track)
+                    tag_track = str(track_int)          # "01" -> "1"
+                    file_track = str(track_int).zfill(2) # "1" -> "01"
+                    
                 for tag, key in mapping.items():
-                    val = raw[key]
-                    if val.upper() == "NULL": audio.pop(tag, None)
-                    elif val: audio[tag] = str(int(val)) if tag == 'tracknumber' and val.isdigit() else val
+                    if tag == 'tracknumber':
+                        val = tag_track
+                    else:
+                        val = raw[key]
+                        
+                    if val.upper() == "NULL": 
+                        audio.pop(tag, None)
+                    elif val: 
+                        # 트랙번호는 정수형태로 정제하여 저장
+                        audio[tag] = val
+                
                 audio.save()
-            except: pass
+                
+                # 2. 파일명 일치 여부 확인 및 변경 로직
+                # 가수명이나 제목 중 하나라도 비어있거나 "NULL"인 경우 파일명 변경을 수행하지 않음
+                if not current_artist or not current_title or \
+                   current_artist.upper() == "NULL" or current_title.upper() == "NULL":
+                    self.log(f"파일명 유지: 정보 부족 (가수: '{current_artist}', 제목: '{current_title}')")
+                    success_count += 1
+                    continue # 다음 파일로 넘어감
+
+                # 정보가 모두 있을 경우에만 실행되는 파일명 변경 로직
+                dir_name = os.path.dirname(fp)
+                ext = os.path.splitext(fp)[1]
+                
+                # 규칙: 가수명 - 트랙번호 - 제목
+                # 값이 비어있을 경우를 대비해 기본값 설정
+                new_artist = raw['ent_artist'] if raw['ent_artist'] else "Unknown"
+                new_title = raw['ent_title'] if raw['ent_title'] else "Untitled"
+                
+                # 파일명에는 두 자리(file_track) 사용
+                new_filename = f"{new_artist} - {file_track} - {new_title}{ext}"
+                new_filename = re.sub(r'[\\/:*?"<>|]', '', new_filename)
+                new_fp = os.path.join(dir_name, new_filename)                
+                
+                # 현재 파일명과 다를 경우에만 이름 변경 실행
+                if os.path.normpath(fp) != os.path.normpath(new_fp):
+                    # 만약 동일한 이름의 파일이 이미 존재한다면 충돌 방지
+                    if os.path.exists(new_fp):
+                        self.log(f"중단: 동일 이름의 파일이 이미 존재함 -> {new_filename}")
+                    else:
+                        os.rename(fp, new_fp)
+                        self.log(f"파일명 변경: {os.path.basename(fp)} -> {new_filename}")
+                        # 내부 경로 데이터 갱신
+                        self.full_file_paths[item_id] = new_fp
+                else:
+                    self.log(f"태그 수정 완료 (파일명 일치): {new_filename}")
+                
+                success_count += 1
+            except Exception as e:
+                self.log(f"오류 발생 ({os.path.basename(fp)}): {e}")
+
+        # 작업 완료 후 입력된 값들을 히스토리에 저장 ---
+        for vn in ["ent_title", "ent_artist", "ent_track", "ent_album", "ent_genre", "ent_date"]:
+            val = getattr(self, vn).get().strip()
+            if val and val.upper() != "NULL":
+                self.update_history(vn, val)
+
+        # 작업 완료 후 목록 새로고침
         self.refresh_grid_list(self.selected_path)
+        # messagebox.showinfo("완료", f"{success_count}개의 파일 처리가 완료되었습니다.")
+        self.log(f"--- 작업 완료: 총 {success_count}개의 파일 처리됨 ---")
     def start_batch_search(self):
         items = self.file_grid.get_children()
         if items: threading.Thread(target=self.batch_search_logic, args=(items,), daemon=True).start()

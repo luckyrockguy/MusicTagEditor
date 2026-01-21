@@ -89,6 +89,9 @@ class MusicTagEditorGUI:
         self.supported_ext = ('.mp3', '.flac', '.m4a', '.ogg', '.wma', '.wav')
         self.full_file_paths = {}
         self.selected_path = ""
+        
+        # [추가] 현재 소팅 상태 저장 (컬럼명, 반전 여부)
+        self.current_sort = {"col": None, "reverse": False}
 
         self.setup_ui()
         self.load_drives()
@@ -172,9 +175,19 @@ class MusicTagEditorGUI:
         
         self.log(f"정보 수신: {alb_title} | 트랙: {trk_num}")
 
-    # --- 기존 정렬 및 유틸리티 로직 ---
     def sort_column(self, col, reverse):
         """그리드의 모든 헤더를 클릭했을 때 호출되는 정렬 메서드"""
+        # 정렬 상태 업데이트
+        self.current_sort["col"] = col
+        self.current_sort["reverse"] = reverse
+        
+        # 모든 헤더에서 기호 제거 및 선택된 헤더에 삼각형 표시
+        for c in self.cols:
+            header_text = c
+            if c == col:
+                header_text += " ▲" if not reverse else " ▼"
+            self.file_grid.heading(c, text=header_text)
+
         # 현재 그리드의 모든 항목 가져오기 (값, 아이디)
         l = [(self.file_grid.set(k, col), k) for k in self.file_grid.get_children('')]
         
@@ -521,17 +534,24 @@ class MusicTagEditorGUI:
             self.full_file_paths[item_id] = fp
             # 추가 후 즉시 선택 상태로 만들어 입력창에 반영
             self.file_grid.selection_set(item_id)
+            
+            # [수정] 소팅 조건 적용
+            if self.current_sort["col"]:
+                self.sort_column(self.current_sort["col"], self.current_sort["reverse"])
         except Exception as e:
             self.log(f"파일 정보 로드 실패: {e}")
     
     def refresh_grid_list(self, path):
-        self.file_grid.delete(*self.file_grid.get_children()); self.full_file_paths.clear()
+        self.file_grid.delete(*self.file_grid.get_children()); 
+        self.full_file_paths.clear()
+        
         for r, _, files in os.walk(path):
             for f in sorted(files):
                 if f.lower().endswith(self.supported_ext):
                     fp = os.path.join(r, f)
                     try:
-                        a = mutagen.File(fp, easy=True); info = mutagen.File(fp).info
+                        a = mutagen.File(fp, easy=True); 
+                        info = mutagen.File(fp).info
                         # --- 트랙 번호 처리 로직 수정 ---
                         raw_track = a.get('tracknumber', ['-'])[0]
                         clean_track = raw_track.split('/')[0] if '/' in raw_track else raw_track
@@ -539,6 +559,11 @@ class MusicTagEditorGUI:
                         v = (f, clean_track, a.get('title', ['-'])[0], a.get('artist', ['-'])[0], a.get('album', ['-'])[0], a.get('date', ['-'])[0], a.get('genre', ['-'])[0], f"{int(info.bitrate/1000)}k")
                         self.full_file_paths[self.file_grid.insert("", "end", values=v)] = fp
                     except: pass
+                    
+        # [수정] 데이터 로드 후 기존 소팅 조건이 있다면 재적용
+        if self.current_sort["col"]:
+            self.sort_column(self.current_sort["col"], self.current_sort["reverse"]) 
+                    
     def set_null_value(self, target_entry): target_entry.delete(0, tk.END); target_entry.insert(0, "Null"); target_entry.config(fg="#D13438")
     def update_field_with_compare(self, ew, nv):
         c = ew.get().strip(); n = str(nv).strip()

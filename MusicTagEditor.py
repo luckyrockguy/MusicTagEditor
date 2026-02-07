@@ -9,6 +9,9 @@ import musicbrainzngs
 import threading
 import regex as regex
 from datetime import datetime
+import requests  # 추가: 이미지 다운로드용
+from PIL import Image, ImageTk  # 추가: 이미지 처리용
+from io import BytesIO
 
 
 # 검색 결과 선택을 위한 별도 팝업 클래스
@@ -33,13 +36,13 @@ class SelectionDialog(tk.Toplevel):
         self.tree.column("노래 제목", width=250, anchor="w")
         self.tree.column("앨범명", width=250, anchor="w")
         self.tree.column("아티스트", width=150, anchor="w")
-        
         self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         # 데이터 삽입
         for res in results:
             tit = res.get('title', '-') # 검색된 곡의 제목
-            rel = res.get('release-list', [{}])[0]
+            rel_list = res.get('release-list', [{}])
+            rel = rel_list[0] if rel_list else {}
             alb = rel.get('title', '-')
             art = res.get('artist-credit-phrase', '-')
             dat = rel.get('date', '-')[:4]
@@ -54,7 +57,9 @@ class SelectionDialog(tk.Toplevel):
                 trk_num = track_list[0].get('number', '-')
             except:
                 pass
-           
+            
+            # release_id를 태그에 저장 (앨범 아트 다운로드용)
+            rel_id = rel.get('id', '')
             self.tree.insert("", "end", values=(tit, alb, art, trk_num, dat), tags=(res['id'],))
 
         btn_frame = tk.Frame(self)
@@ -72,20 +77,22 @@ class SelectionDialog(tk.Toplevel):
             # [주의] 데이터 구조가 변경되었으므로 인덱스 확인
             # values는 (노래 제목, 앨범명, 아티스트, 트랙번호, 연도) 순서입니다.
             full_values = self.tree.item(sel[0], 'values')
+            # tags[0]에 저장된 정보를 rel_id로 명시적으로 추출
+            rel_id = self.tree.item(sel[0], 'tags')[0]
             # 기존 GUI에서 기대하는 데이터 형식(앨범, 아티스트, 트랙, 연도)으로 슬라이싱하여 전달
             # 노래 제목은 이미 입력창에 있으므로 앨범 정보부터 추출합니다.
-            self.result_data = (full_values[1], full_values[2], full_values[3], full_values[4])
+            self.result_data = (full_values[1], full_values[2], full_values[3], full_values[4], rel_id)
             self.destroy()
 
 class MusicTagEditorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("음악 태그 정제기 v2.1 (Search Selection)")
-        self.root.geometry("1300x950")
+        self.root.title("Music Tag Editor v2.5 (Internet Search)")
+        self.root.geometry("1400x950")
         self.root.configure(bg="#F3F3F3")
         
         self.history_dict = {k: [] for k in ["ent_title", "ent_artist", "ent_track", "ent_album", "ent_genre", "ent_date", "ent_keywords"]}
-        musicbrainzngs.set_useragent("MyMusicTagTool", "2.1", "contact@example.com")
+        musicbrainzngs.set_useragent("MyMusicTagTool", "2.5", "rockguy.im@gmail.com")
         self.supported_ext = ('.mp3', '.flac', '.m4a', '.ogg', '.wma', '.wav')
         self.full_file_paths = {}
         self.selected_path = ""
@@ -93,6 +100,8 @@ class MusicTagEditorGUI:
         # [추가] 현재 소팅 상태 저장 (컬럼명, 반전 여부)
         self.current_sort = {"col": None, "reverse": False}
 
+        self.current_album_art = None # 메모리 누수 방지용 참조 유지
+        
         self.setup_ui()
         self.load_drives()
         self.log("시스템 시작: 다중 검색 결과 선택 기능이 로드되었습니다.")
@@ -127,8 +136,8 @@ class MusicTagEditorGUI:
                 self.root.wait_window(dialog)
                 
                 if dialog.result_data:
-                    # dialog.result_data 구조: (앨범명, 아티스트, 트랙번호, 연도)
-                    alb, artist_name, trk, dat = dialog.result_data
+                    # dialog.result_data 구조: (앨범명, 아티스트, 트랙번호, 연도, rel_id)
+                    alb, artist_name, trk, dat, rel_id = dialog.result_data
                     
                     # 입력 필드 업데이트 (기존 앨범, 연도 외에 '트랙' 추가)
                     self.update_field_with_compare(self.ent_album, alb)
@@ -141,6 +150,12 @@ class MusicTagEditorGUI:
                     
                     # 아티스트 정보도 필요시 업데이트 가능
                     self.update_field_with_compare(self.ent_artist, artist_name)
+                    
+                    # 검색 결과에서 선택된 Release ID로 이미지 다운로드 시도
+                    sel = self.file_grid.selection()
+                    if sel:
+                        fp = self.full_file_paths.get(sel[0])
+                        self.load_album_art(fp, rel_id)
                     
                     self.log(f"사용자 선택 적용: {alb} | 트랙: {trk} | 연도: {dat}")
 
@@ -176,7 +191,7 @@ class MusicTagEditorGUI:
         self.log(f"정보 수신: {alb_title} | 트랙: {trk_num}")
 
     def sort_column(self, col, reverse):
-        """그리드의 모든 헤더를 클릭했을 때 호출되는 정렬 메서드"""
+        # 그리드의 모든 헤더를 클릭했을 때 호출되는 정렬 메서드
         # 정렬 상태 업데이트
         self.current_sort["col"] = col
         self.current_sort["reverse"] = reverse
@@ -222,23 +237,43 @@ class MusicTagEditorGUI:
     def setup_ui(self):
         self.style = ttk.Style()
         self.style.theme_use('clam')
+        
+        # 메인 레이아웃: 좌측(탐색기) | 우측(작업영역)
         self.main_paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashrelief=tk.FLAT, sashwidth=4, bg="#F3F3F3")
         self.main_paned.pack(fill=tk.BOTH, expand=True)
+        
         self.left_frame = tk.Frame(self.main_paned, bg="#F3F3F3")
         self.main_paned.add(self.left_frame, width=280)
         self.create_left_widgets()
+        
         self.right_frame = tk.Frame(self.main_paned, bg="#FFFFFF")
         self.main_paned.add(self.right_frame)
-        self.input_area = tk.Frame(self.right_frame, bg="#FFFFFF")
-        self.input_area.pack(fill=tk.X, padx=15, pady=(15, 0))
+
+        # 상단 영역: [입력필드 영역 | 앨범 아트 영역]
+        top_container = tk.Frame(self.right_frame, bg="#FFFFFF")
+        top_container.pack(fill=tk.X, padx=15, pady=5)
+        
+        # Tag 입력부 폭 조절 (상대적 비율 유지)
+        self.input_area = tk.Frame(top_container, bg="#FFFFFF")
+        self.input_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 앨범 아트 표시 레이블
+        self.art_size = 250 
+        self.art_frame = tk.Frame(top_container, bg="#FFFFFF", width=self.art_size, height=self.art_size, 
+                                 highlightbackground="#DDDDDD", highlightthickness=1)
+        self.art_frame.pack(side=tk.RIGHT, padx=(15, 0))
+        self.art_frame.pack_propagate(False)
+        self.lbl_art = tk.Label(self.art_frame, text="No Image", bg="#EEEEEE", font=('Malgun Gothic', 9))
+        self.lbl_art.pack(fill=tk.BOTH, expand=True)
+
         self.create_input_fields()
+        
         self.button_area = tk.Frame(self.right_frame, bg="#FFFFFF")
-        self.button_area.pack(fill=tk.X, padx=15, pady=10)
+        self.button_area.pack(fill=tk.X, padx=15, pady=2)
         self.create_control_buttons()
-        self.dir_tree.tag_configure('file', foreground='#0078D4') # 파일은 파란색
-        self.dir_tree.tag_configure('folder', foreground='#333333') # 폴더는 검정색 
+
         self.v_paned = tk.PanedWindow(self.right_frame, orient=tk.VERTICAL, sashrelief=tk.FLAT, sashwidth=4, bg="#F3F3F3")
-        self.v_paned.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+        self.v_paned.pack(fill=tk.BOTH, expand=True, padx=15, pady=2)
         self.create_grid_area()
         self.create_log_area()
         self.create_context_menus()
@@ -246,11 +281,10 @@ class MusicTagEditorGUI:
     def create_input_fields(self):
         f_grid = tk.Frame(self.input_area, bg="#FFFFFF")
         f_grid.pack(fill=tk.X)
-
-        # 현재 선택된 폴더 경로 표시 레이블
-        self.lbl_path = tk.Label(f_grid, text="📁 폴더를 선택해 주세요", fg="#555555", 
-                                 bg="#FFFFFF", font=('Malgun Gothic', 9, 'bold'))
-        self.lbl_path.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        
+        # 우클릭 메뉴 생성 (복사 기능)
+        self.entry_menu = tk.Menu(self.root, tearoff=0)
+        self.entry_menu.add_command(label="복사", command=self.copy_text)
 
         # 필드 구성 정의: (레이블 텍스트, 변수명, CLR 버튼 여부)
         fields = [
@@ -260,10 +294,10 @@ class MusicTagEditorGUI:
             ("앨범", "ent_album", True), 
             ("장르", "ent_genre", True), 
             ("연도", "ent_date", True), 
-            ("키워드", "ent_keywords", False)
+            ("필터링 키워드", "ent_keywords", False)
         ]
 
-        for i, (lt, vn, cl) in enumerate(fields, 1):
+        for i, (lt, vn, cl) in enumerate(fields):
             # 레이블 영역 (텍스트 + CLR 버튼)
             lbl_c = tk.Frame(f_grid, bg="#FFFFFF")
             lbl_c.grid(row=i, column=0, sticky="e", pady=3, padx=(0, 10))
@@ -274,7 +308,9 @@ class MusicTagEditorGUI:
             ent = tk.Entry(f_grid, font=('Malgun Gothic', 10), relief=tk.SOLID, borderwidth=1)
             setattr(self, vn, ent)
             
-            # [기능 추가] 더블 클릭 시 최근 입력 기록 7개 팝업 노출
+            # 1. 우클릭 바인딩 (메뉴 띄우기)
+            ent.bind("<Button-3>", self.show_entry_context_menu)
+            # 2. 더블 클릭 시 최근 입력 기록 7개 팝업 노출
             ent.bind("<Double-1>", lambda e, v=vn: self.show_history_popup(e, v))
             
             # CLR(초기화) 버튼이 필요한 필드인 경우
@@ -293,6 +329,79 @@ class MusicTagEditorGUI:
         
         # 그리드 너비 가변 설정
         f_grid.columnconfigure(2, weight=1)
+
+    # --- [입력창에서 우클릭 시 메뉴 표시] ---
+    def show_entry_context_menu(self, event):
+        self.last_focused_entry = event.widget # 우클릭된 위젯 저장
+        self.entry_menu.post(event.x_root, event.y_root)
+
+    def copy_text(self):
+        """선택된 텍스트를 클립보드에 복사"""
+        try:
+            # 포커스된 위젯에서 선택된 영역(Selection) 가져오기
+            selected_text = self.last_focused_entry.selection_get()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(selected_text)
+            self.log(f"텍스트 복사 완료: {selected_text}")
+        except:
+            # 선택된 영역이 없을 경우의 예외 처리
+            pass
+
+    # --- 앨범 아트 관련 핵심 메서드 ---
+    def load_album_art(self, file_path, release_id=None):
+        """로컬 확인 후 없으면 온라인에서 다운로드하여 표시"""
+        folder = os.path.dirname(file_path)
+        art_files = ['cover.jpg', 'cover.png', 'folder.jpg', 'album.jpg']
+        found_path = None
+
+        # 1. 로컬 폴더 검색
+        for f in art_files:
+            p = os.path.join(folder, f)
+            if os.path.exists(p):
+                found_path = p
+                break
+        
+        if found_path:
+            self.display_image(found_path)
+            self.log(f"로컬 이미지 로드: {os.path.basename(found_path)}")
+            return
+
+        # 2. 온라인 검색 및 다운로드 (Thread 사용)
+        if release_id:
+            threading.Thread(target=self.download_album_art, args=(folder, release_id), daemon=True).start()
+        else:
+            # Release ID가 없으면 기본 이미지 표시
+            self.lbl_art.config(image='', text="No Image")
+
+    def download_album_art(self, folder, release_id):
+        """Cover Art Archive API를 통해 이미지 다운로드"""
+        try:
+            self.log(f"온라인 이미지 검색 중... (Release ID: {release_id})")
+            url = f"https://coverartarchive.org/release/{release_id}/front-250"
+            res = requests.get(url, timeout=10)
+            
+            if res.status_code == 200:
+                save_path = os.path.join(folder, "cover.jpg")
+                with open(save_path, "wb") as f:
+                    f.write(res.content)
+                self.root.after(0, lambda: self.display_image(save_path))
+                self.log("앨범 아트 다운로드 완료: cover.jpg")
+            else:
+                self.root.after(0, lambda: self.lbl_art.config(text="Art Not Found"))
+        except Exception as e:
+            self.log(f"이미지 다운로드 실패: {e}")
+
+    def display_image(self, img_path):
+        """PIL을 사용하여 이미지를 220x220으로 리사이징하여 표시"""
+        try:
+            img = Image.open(img_path)
+            img.thumbnail((self.art_size, self.art_size), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self.lbl_art.config(image=photo, text="")
+            self.current_album_art = photo # 참조 유지
+        except Exception as e:
+            self.lbl_art.config(text="Error Loading Art")
+            self.log(f"이미지 표시 오류: {e}")
 
     def show_history_popup(self, event, var_name):
         """더블 클릭 시 최근 기록 7개를 보여주는 팝업 생성"""
@@ -341,7 +450,7 @@ class MusicTagEditorGUI:
         listbox.focus_set()
 
     def update_history(self, var_name, value):
-        """새로운 입력값을 히스토리에 저장 (최대 7개 유지, 중복 제거)"""
+        # 새로운 입력값을 히스토리에 저장 (최대 7개 유지, 중복 제거)
         if not value or value.upper() == "NULL": return
         
         if var_name not in self.history_dict:
@@ -358,7 +467,7 @@ class MusicTagEditorGUI:
             self.history_dict[var_name].pop(0)
 
     def advanced_title_parse(self):
-        """텍스트 파싱 및 트랙 번호 추출 기능"""
+        # 텍스트 파싱 및 트랙 번호 추출 기능
         src = self.ent_title.get().strip()
         if not src: 
             self.log("알림: 파싱할 제목이 없습니다.")
@@ -391,7 +500,7 @@ class MusicTagEditorGUI:
 
         # 특수문자 정제
         #clean = re.sub(r'[^a-zA-Z0-9가-힣\s\(\)\[\]\&\.\']', ' ', clean).strip()
-        clean = regex.sub(r'[^\p{Latin}\p{Hangul}\p{Han}\p{Hiragana}\p{Katakana}\d\s\(\)\[\]\.\&]', ' ', clean).strip()
+        clean = regex.sub(r'[^\p{Latin}\p{Hangul}\p{Han}\p{Hiragana}\p{Katakana}\d\s\(\)\[\]\.\&\']', ' ', clean).strip()
         
         if src != clean:
             self.ent_title.delete(0, tk.END)
@@ -402,23 +511,24 @@ class MusicTagEditorGUI:
     def create_control_buttons(self):
         # 상단 일괄 실행 버튼
         ttk.Button(self.button_area, text="🚀 태그 수정 및 파일명 일괄 변경 실행 (선택 항목)", 
-                   command=self.run_process).pack(fill=tk.X, ipady=8)
+                   command=self.run_process).pack(fill=tk.X, ipady=4)
         
         sub = tk.Frame(self.button_area, bg="#FFFFFF")
-        sub.pack(fill=tk.X, pady=5)
+        sub.pack(fill=tk.X, pady=3)
         
         # 버튼 리스트 구성
         btns = [
             ("🧹 초기화", self.clear_fields_with_color),
-            ("🏷️ 모든 파일명 생성", self.generate_all_filenames),
+            ("🏷️ 파일명 자동 생성", self.generate_all_filenames),
             ("📝 제목 파싱", self.advanced_title_parse),
-            ("🌐 검색", self.fetch_online_data),
-            ("🔍 자동 매칭", self.start_batch_search)
+            ("🌐 온라인 검색", self.fetch_online_data),
+            ("🔍 온라인 전체 검색", self.start_batch_search)
         ]
         
         for i, (t, c) in enumerate(btns):
             sub.columnconfigure(i, weight=1)
-            ttk.Button(sub, text=t, command=c).grid(row=0, column=i, sticky="ew", padx=2)
+            btn = ttk.Button(sub, text=t, command=c)
+            btn.grid(row=0, column=i, sticky="ew", padx=5, ipady=3) # ipady 추가
 
     def create_grid_area(self):
         g_f = tk.Frame(self.v_paned, bg="white"); self.v_paned.add(g_f, height=550)
@@ -450,6 +560,8 @@ class MusicTagEditorGUI:
         self.drive_combo.bind("<<ComboboxSelected>>", self.on_drive_select)
         self.dir_tree = ttk.Treeview(self.left_frame, selectmode="browse"); self.dir_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.dir_tree.bind("<<TreeviewOpen>>", self.on_dir_open); self.dir_tree.bind("<Double-1>", self.on_dir_double_click); self.dir_tree.bind("<Button-3>", self.on_tree_right_click)
+        self.dir_tree.tag_configure('file', foreground='#0078D4') # 파일은 파란색
+        self.dir_tree.tag_configure('folder', foreground='#333333') # 폴더는 검정색 
 
     def create_context_menus(self):
         self.file_context_menu = tk.Menu(self.root, tearoff=0)
@@ -497,12 +609,10 @@ class MusicTagEditorGUI:
         if os.path.isdir(path):
             # 폴더인 경우: 기존 방식대로 폴더 내 모든 파일 리스트업
             self.selected_path = path
-            self.lbl_path.config(text=f"📂 {self.selected_path}")
             self.refresh_grid_list(self.selected_path)
         else:
             # 파일인 경우: 그리드를 비우고 해당 파일 하나만 추가
             self.selected_path = os.path.dirname(path)
-            self.lbl_path.config(text=f"📄 {path}")
             self.add_single_file_to_grid(path)
 
     def add_single_file_to_grid(self, fp):
@@ -579,15 +689,57 @@ class MusicTagEditorGUI:
         # 그리드에서 선택된 행의 값들 가져오기
         # v[0]: 파일명, v[1]: 트랙, v[2]: 제목, v[3]: 가수, v[4]: 앨범, v[5]: 연도, v[6]: 장르
         v = self.file_grid.item(sel[0], "values")
+        fp = self.full_file_paths.get(sel[0])
         
-        # --- [로직 추가] 제목이 없는 경우 파일명으로 대체 ---
-        display_title = v[2]
-        if not display_title or display_title.strip() == "-":
-            # 파일명(v[0])에서 확장자를 제외한 순수 이름만 추출
-            file_name_only = os.path.splitext(v[0])[0]
+        # --- [로직 수정 및 강화] 제목 판별부 ---
+        raw_title = v[2].strip()
+        file_name_only = os.path.splitext(v[0])[0]
+        
+        # 깨진 문자열 판별 함수 (정규식 활용)
+        def is_broken_string(s):
+            """비정상적인 인코딩(깨진 문자)을 검출하는 정밀 로직"""
+            if not s or s == "-": return True
+            if '\ufffd' in s: return True # 유니코드 대체 문자 확인
+            
+            # 1. 정상 문자군 정의 (한글, 영어, 숫자, 기본 문장부호)
+            # regex 라이브러리의 유니코드 속성 활용
+            valid_pattern = regex.compile(r'[\p{Hangul}\p{Latin}\d\s\(\)\[\]\.\&\!\?\-\_\,\'\"]+')
+            valid_chars = "".join(valid_pattern.findall(s))
+            
+            # 2. 비정상 문자군 정의 (인코딩 깨짐 시 주로 나타나는 라틴 확장 기호 및 특수 기호)
+            # 사용자가 제시한 ´, °, ¸, ¾ 등 ASCII 범위를 벗어난 기호들 감시
+            broken_pattern = regex.compile(r'[^\p{Hangul}\p{ASCII}\p{Hiragana}\p{Katakana}\p{Han}]+')
+            broken_chars = "".join(broken_pattern.findall(s))
+            
+            # 판별 기준 A: 전체 길이 대비 정상 문자 비율이 너무 낮음 (50% 미만)
+            if len(s) > 0:
+                valid_ratio = len(valid_chars) / len(s)
+                if valid_ratio < 0.5:
+                    return True
+            
+            # 판별 기준 B: 깨진 문자 기호(라틴 확장 등)가 30% 이상 포함됨
+            if len(s) > 0:
+                broken_ratio = len(broken_chars) / len(s)
+                if broken_ratio > 0.3:
+                    return True
+                    
+            # 판별 기준 C: 특정 깨진 패턴의 연속성 (예: ´Ï°¡ 처럼 기호와 문자가 뒤섞임)
+            # 일반적인 한국어/영어 문장에서는 발생하기 힘든 조합을 체크
+            if regex.search(r'[^\x00-\x7F][^\x00-\x7F]{2,}', s):
+                # 비-ASCII 문자가 의미 없이 나열되는 경우 (정상 한글 제외 필터 필요)
+                # 한글은 \p{Hangul}로 이미 valid_chars에서 걸러지므로 
+                # 남은 문자열 중 연속된 비정상 기호 확인
+                remaining = regex.sub(r'[\p{Hangul}\s\d\p{Latin}]+', '', s)
+                if len(remaining) > len(s) * 0.2:
+                    return True
+
+            return False
+        
+        if is_broken_string(raw_title):
             display_title = file_name_only
-            self.log(f"정보: 태그 제목이 없어 파일명('{display_title}')을 제목창에 표시합니다.")
-        # -----------------------------------------------
+            self.log(f"⚠️ 깨진 타이틀 감지: '{raw_title[:15]}...' -> 파일명으로 대체 표시")
+        else:
+            display_title = raw_title
 
         mapping = {
             self.ent_title: display_title, # 수정된 제목 적용
@@ -608,6 +760,10 @@ class MusicTagEditorGUI:
                 
             w.insert(0, cv)
             w.config(fg="black")
+            
+        # 앨범 아트 로드 시도
+        if fp:
+            self.load_album_art(fp)
             
     def on_grid_right_click(self, event):
         item = self.file_grid.identify_row(event.y)
@@ -639,6 +795,7 @@ class MusicTagEditorGUI:
             
             if deleted_count > 0:
                 self.log(f"--- 총 {deleted_count}개의 파일이 삭제되었습니다 ---")
+                
     def delete_selected_folder(self):
         item = self.dir_tree.selection()
         if not item: 
@@ -657,17 +814,86 @@ class MusicTagEditorGUI:
                     self.file_grid.delete(*self.file_grid.get_children())
                 except Exception as e:
                     self.log(f"폴더 삭제 오류: {e}")
+                    
     def rename_selected_folder(self):
         item = self.dir_tree.selection()
         if not item: return
-        old = self.dir_tree.item(item[0], "values")[0]
-        new = simpledialog.askstring("이름 바꾸기", "새 이름:", initialvalue=os.path.basename(old))
-        if new:
-            new_fp = os.path.join(os.path.dirname(old), new)
-            os.rename(old, new_fp); self.on_drive_select(None)
-            
-            
         
+        # 선택된 노드의 현재 정보 안전하게 가져오기
+        item_values = self.dir_tree.item(item[0], "values")
+        if not item_values: return
+        
+        old_path = item_values[0]
+        old_name = os.path.basename(old_path)
+        parent_dir = os.path.dirname(old_path)
+
+        # 팝업창 가로 넓이 확보를 위해 구분선 추가
+        new_name = simpledialog.askstring("이름 바꾸기", 
+                                          f"현재 폴더명: {old_name}\n" + "-"*60 + 
+                                          "\n새로운 폴더 이름을 입력하세요:", 
+                                          initialvalue=old_name)
+        
+        if new_name and new_name != old_name:
+            new_path = os.path.join(parent_dir, new_name)
+            try:
+                os.rename(old_path, new_path)
+                self.log(f"폴더명 변경 완료: {old_name} -> {new_name}")
+                
+                # [에러 해결 핵심] 트리를 완전히 새로 고친 후 타겟 폴더 탐색
+                self.refresh_and_expand_target_only(new_path)
+                
+            except Exception as e:
+                self.log(f"폴더명 변경 오류: {e}")
+                messagebox.showerror("오류", f"이름을 바꿀 수 없습니다: {e}")
+
+    def refresh_and_expand_target_only(self, target_path):
+        """트리를 재로드하고 이름이 변경된 해당 폴더만 정확히 확장함"""
+        # 1. 트리 초기화 및 드라이브부터 다시 로드 (무효화된 인덱스 정리)
+        self.on_drive_select(None)
+        
+        # 2. 변경된 폴더 경로로 가는 길목만 찾아 확장 (비동기적 처리 방지를 위해 약간의 지연 권장하나 직접 호출)
+        self.root.update_idletasks() # UI 강제 업데이트로 노드 생성 보장
+        self.focus_and_expand_path(target_path)
+
+    def focus_and_expand_path(self, target_path):
+        """트리 노드를 순회하며 타겟 경로만 확장"""
+        target_path = os.path.normpath(target_path)
+        
+        def search_node(parent):
+            for child in self.dir_tree.get_children(parent):
+                node_values = self.dir_tree.item(child, "values")
+                if not node_values: continue
+                
+                node_path = os.path.normpath(node_values[0])
+                
+                # 현재 노드가 타겟 경로의 일부이거나 타겟 자체인 경우
+                if target_path.startswith(node_path):
+                    # 자식 노드들을 먼저 로드하기 위해 확장 (on_dir_open의 기능 수행)
+                    self.dir_tree.item(child, open=True)
+                    self.on_dir_open_manual(child) # 수동으로 하위 노드 생성 유도
+                    
+                    # 정확히 일치하는 폴더를 찾은 경우
+                    if node_path == target_path:
+                        self.dir_tree.selection_set(child)
+                        self.dir_tree.focus(child)
+                        self.dir_tree.see(child)
+                        return True
+                    
+                    # 하위 단계 탐색 계속
+                    if search_node(child):
+                        return True
+            return False
+
+        search_node('') # 루트부터 탐색 시작
+
+    def on_dir_open_manual(self, item_id):
+        """이벤트 없이 수동으로 노드를 확장할 때 하위 목록을 로드하는 헬퍼"""
+        values = self.dir_tree.item(item_id, "values")
+        if values:
+            path = values[0]
+            self.dir_tree.delete(*self.dir_tree.get_children(item_id))
+            self.insert_nodes(item_id, path)
+         
     def get_unique_filename(self, folder, filename):
         """파일명이 중복될 경우 (1), (2) 등을 붙여 고유한 이름을 생성"""
         base, ext = os.path.splitext(filename)

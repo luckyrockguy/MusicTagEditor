@@ -327,6 +327,18 @@ class MusicTagEditorGUI:
                 # 나머지 필드는 길게 배치
                 ent.grid(row=i, column=1, columnspan=3, sticky="ew", padx=2, pady=3)
         
+        # 필터링 키워드 아래에 파일 경로 표시 영역 ---
+        path_frame = tk.Frame(self.input_area, bg="#FFFFFF")
+        path_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Label(path_frame, text="파일 경로:", font=('Malgun Gothic', 9, 'bold'), 
+                 bg="#FFFFFF", fg="#666666").pack(side=tk.LEFT, padx=(10, 5))
+        
+        # 실제 경로가 출력될 레이블 (초기값은 빈 문자열)
+        self.lbl_full_path = tk.Label(path_frame, text="", font=('Consolas', 9), 
+                                      bg="#FFFFFF", fg="#0078D4", anchor="w", justify=tk.LEFT)
+        self.lbl_full_path.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         # 그리드 너비 가변 설정
         f_grid.columnconfigure(2, weight=1)
 
@@ -689,11 +701,17 @@ class MusicTagEditorGUI:
         # 그리드에서 선택된 행의 값들 가져오기
         # v[0]: 파일명, v[1]: 트랙, v[2]: 제목, v[3]: 가수, v[4]: 앨범, v[5]: 연도, v[6]: 장르
         v = self.file_grid.item(sel[0], "values")
-        fp = self.full_file_paths.get(sel[0])
+        fp = self.full_file_paths.get(sel[0])  # 선택된 아이템의 실제 경로 가져오기
         
+        # 파일 경로 레이블 업데이트 ---
+        if fp:
+            self.lbl_full_path.config(text=fp)
+        else:
+            self.lbl_full_path.config(text="")
+
         # --- [로직 수정 및 강화] 제목 판별부 ---
         raw_title = v[2].strip()
-        file_name_only = os.path.splitext(v[0])[0]
+        file_name_only = os.path.splitext(v[0])[0]  
         
         # 깨진 문자열 판별 함수 (정규식 활용)
         def is_broken_string(s):

@@ -794,6 +794,7 @@ class MusicTagEditorGUI:
             ("🏷️ 파일명 자동 생성", self.generate_all_filenames),
             ("📝 제목 파싱", self.advanced_title_parse),
             ("🌐 온라인 검색", self.fetch_online_data),
+            ("📅 연도 정리", self.batch_clean_year),
             ("👤 가수 → 앨범음악가", self.copy_artist_to_albumartist)
         ]
         
@@ -1388,6 +1389,59 @@ class MusicTagEditorGUI:
         self.refresh_grid_list(self.selected_path)
         # messagebox.showinfo("완료", f"{success_count}개의 파일 처리가 완료되었습니다.")
         self.log(f"--- 작업 완료: 총 {success_count}개의 파일 처리됨 ---")
+
+    def batch_clean_year(self):
+        """그리드 내 모든 파일의 연도를 yyyy 형식으로 일괄 정리"""
+        items = self.file_grid.get_children()
+        if not items:
+            messagebox.showwarning("알림", "처리할 파일이 목록에 없습니다.")
+            return
+
+        if not messagebox.askyesno("확인", "목록에 있는 모든 파일의 연도를 'yyyy' 형식으로 정리하시겠습니까?"):
+            return
+
+        self.log("--- 연도 일괄 정리 시작 ---")
+        success_count = 0
+        
+        for item_id in items:
+            fp = self.full_file_paths.get(item_id)
+            if not fp or not os.path.exists(fp): continue
+            
+            # 그리드에서 현재 연도 값 가져오기 (index 6: 연도)
+            v = self.file_grid.item(item_id, "values")
+            raw_date = v[6].strip()
+            
+            # 정규표현식으로 숫자 4자리 추출 (yyyy)
+            match = re.search(r'\d{4}', raw_date)
+            if match:
+                clean_year = match.group()
+                
+                # 현재 값이 이미 4자리 연도와 같다면 파일 수정 건너뜀 (성능 최적화)
+                if raw_date == clean_year:
+                    success_count += 1
+                    continue
+                
+                try:
+                    # 실제 파일 태그 수정
+                    audio = mutagen.File(fp, easy=True)
+                    if audio is not None:
+                        audio['date'] = clean_year
+                        audio.save()
+                        
+                        # UI 그리드 갱신
+                        new_values = list(v)
+                        new_values[6] = clean_year
+                        self.file_grid.item(item_id, values=new_values)
+                        
+                        self.log(f"연도 수정 완료: {os.path.basename(fp)} ({raw_date} -> {clean_year})")
+                        success_count += 1
+                except Exception as e:
+                    self.log(f"오류 발생 ({os.path.basename(fp)}): {e}")
+            else:
+                self.log(f"건너뜀 (유효한 연도 없음): {os.path.basename(fp)} - {raw_date}")
+
+        self.log(f"--- 작업 완료: 총 {success_count}개의 파일 연도 정리됨 ---")
+        messagebox.showinfo("완료", f"연도 정리가 완료되었습니다.\n(처리된 파일: {success_count}개)")
 
     def copy_artist_to_albumartist(self):
         """가수 정보를 앨범음악가로 복사 (MP3 프레임 오류 및 모든 포맷 대응)"""

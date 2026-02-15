@@ -1,0 +1,26 @@
+[14:24:24] on_closing 호출됨
+[14:24:24] save_config 시작
+[14:24:24] 저장 경로: E:\_Library\PythonPROJECT\MusicTagEditor\dist\config.xml
+[14:24:24] [1] geometry: 2004x1012+318+86
+[14:24:24] [2] last_path: 
+[14:24:24] [3] sash_main: 495
+[14:24:24] [4] sash_right: 551
+[14:24:24] [5] 저장 완료: E:\_Library\PythonPROJECT\MusicTagEditor\dist\config.xml
+[14:26:42] on_closing 호출됨
+[14:26:42] save_config 시작
+[14:26:42] 저장 경로: E:\_Library\PythonPROJECT\MusicTagEditor\dist\config.xml
+[14:26:42] [1] geometry: 2004x1344+242+2
+[14:26:42] [2] last_path: F:\02.MUSIC\POP\Bob Dylan
+[14:26:42] [3] sash_main: 495
+[14:26:42] [4] sash_right: 831
+[14:26:42] [5] 저장 완료: E:\_Library\PythonPROJECT\MusicTagEditor\dist\config.xml
+[14:36:39] on_closing 호출됨
+[14:36:39] save_config 시작
+[14:36:39] 저장 경로: E:\_Library\PythonPROJECT\MusicTagEditor\dist\config.xml
+[14:36:39] [1] geometry: 2004x1344+242+2
+[14:36:39] [2] last_path: F:\02.MUSIC\POP\Adam Levine
+[14:36:39] [3] last_drive: F:\
+[14:36:39] [4] last_folder: F:\02.MUSIC\POP\Adam Levine
+[14:36:39] [5] sash_main: 495
+[14:36:39] [6] sash_right: 831
+[14:36:39] [7] 저장 완료: E:\_Library\PythonPROJECT\MusicTagEditor\dist\config.xml
